@@ -169,124 +169,24 @@ def make_source_address_tuple(source_address):
     return None
 
 
-def connection_factory(address, timeout=_GLOBAL_DEFAULT_TIMEOUT,
-                       source_address=None):
-    return socket.create_connection(address, timeout, source_address)
-
-
-class SpeedtestHTTPConnection(HTTPConnection):
-    """Custom HTTPConnection to support source_address across
-    Python 2.4 - Python 3
-    """
-    def __init__(self, *args, **kwargs):
-        source_address = kwargs.pop('source_address', None)
-        timeout = kwargs.pop('timeout', 10)
-
-        self._tunnel_host = None
-
-        HTTPConnection.__init__(self, *args, **kwargs)
-
-        self.source_address = source_address
-        self.timeout = timeout
-
-    def connect(self):
-        """Connect to the host and port specified in __init__."""
-        self.sock = connection_factory(
-            (self.host, self.port),
-            self.timeout,
-            self.source_address
-        )
-
-        if self._tunnel_host:
-            self._tunnel()
-
-
-class SpeedtestHTTPSConnection(HTTPSConnection):
-    """Custom HTTPSConnection to support source_address across
-    Python 2.4 - Python 3
-    """
-    default_port = 443
-
-    def __init__(self, *args, **kwargs):
-        source_address = kwargs.pop('source_address', None)
-        timeout = kwargs.pop('timeout', 10)
-
-        self._tunnel_host = None
-
-        HTTPSConnection.__init__(self, *args, **kwargs)
-
-        self.timeout = timeout
-        self.source_address = source_address
-
-    def connect(self):
-        "Connect to a host on a given (SSL) port."
-        self.sock = socket.create_connection(
-            (self.host, self.port),
-            self.timeout,
-            self.source_address
-        )
-
-        if self._tunnel_host:
-            self._tunnel()
-
-        if ssl:
-            try:
-                kwargs = {}
-                if hasattr(ssl, 'SSLContext'):
-                    if self._tunnel_host:
-                        kwargs['server_hostname'] = self._tunnel_host
-                    else:
-                        kwargs['server_hostname'] = self.host
-                self.sock = self._context.wrap_socket(self.sock, **kwargs)
-            except AttributeError:
-                self.sock = ssl.wrap_socket(self.sock)
-                try:
-                    self.sock.server_hostname = self.host
-                except AttributeError:
-                    pass
-        else:
-            raise SpeedtestException(
-                'This version of Python does not support HTTPS/SSL '
-                'functionality'
-            )
-
-
-def _build_connection(connection, source_address, timeout, context=None):
-    """Cross Python 2.4 - Python 3 callable to build an ``HTTPConnection`` or
-    ``HTTPSConnection`` with the args we need
-
-    Called from ``http(s)_open`` methods of ``SpeedtestHTTPHandler`` or
-    ``SpeedtestHTTPSHandler``
-    """
-    def inner(host, **kwargs):
-        kwargs.update({
-            'source_address': source_address,
-            'timeout': timeout
-        })
-        if context:
-            kwargs['context'] = context
-        return connection(host, **kwargs)
-    return inner
-
-
 class SpeedtestHTTPHandler(AbstractHTTPHandler):
     """Custom ``HTTPHandler`` that can build a ``HTTPConnection`` with the
     args we need for ``source_address`` and ``timeout``
     """
     def __init__(self, debuglevel=0, source_address=None, timeout=10):
-        AbstractHTTPHandler.__init__(self, debuglevel)
+        super().__init__(debuglevel)
         self.source_address = source_address
         self.timeout = timeout
 
-    def http_open(self, req):
-        return self.do_open(
-            _build_connection(
-                SpeedtestHTTPConnection,
-                self.source_address,
-                self.timeout
-            ),
-            req
+    def _create_connection(self, host, **kwargs):
+        timeout = kwargs.pop('timeout', 10)
+        source_address = kwargs.pop('source_address', None)
+        return HTTPConnection(
+            host, timeout=timeout, source_address=source_address,  **kwargs,
         )
+
+    def http_open(self, req):
+        return self.do_open(self._create_connection, req)
 
     http_request = AbstractHTTPHandler.do_request_
 
@@ -297,21 +197,21 @@ class SpeedtestHTTPSHandler(AbstractHTTPHandler):
     """
     def __init__(self, debuglevel=0, context=None, source_address=None,
                  timeout=10):
-        AbstractHTTPHandler.__init__(self, debuglevel)
+        super().__init__(debuglevel)
         self._context = context
         self.source_address = source_address
         self.timeout = timeout
 
-    def https_open(self, req):
-        return self.do_open(
-            _build_connection(
-                SpeedtestHTTPSConnection,
-                self.source_address,
-                self.timeout,
-                context=self._context,
-            ),
-            req
+    def _create_connection(self, host, **kwargs):
+        timeout = kwargs.pop('timeout', 10)
+        source_address = kwargs.pop('source_address', None)
+        kwargs['context'] = self._context
+        return HTTPSConnection(
+            host, timeout=timeout, source_address=source_address,  **kwargs,
         )
+
+    def https_open(self, req):
+        return self.do_open(self._create_connection, req)
 
     https_request = AbstractHTTPHandler.do_request_
 
@@ -371,20 +271,13 @@ class GzipDecodedResponse(gzip.GzipFile):
                 break
             self.io.write(chunk)
         self.io.seek(0)
-        gzip.GzipFile.__init__(self, mode='rb', fileobj=self.io)
+        super().__init__(mode='rb', fileobj=self.io)
 
     def close(self):
         try:
             gzip.GzipFile.close(self)
         finally:
             self.io.close()
-
-
-def get_exception():
-    """Helper function to work with py2.4-py3 for getting the current
-    exception in a try/except block
-    """
-    return sys.exc_info()[1]
 
 
 def distance(origin, destination):
@@ -474,8 +367,7 @@ def catch_request(request, opener=None):
         if request.get_full_url() != uh.geturl():
             printer('Redirected to %s' % uh.geturl(), debug=True)
         return uh, False
-    except HTTP_ERRORS:
-        e = get_exception()
+    except HTTP_ERRORS as e:
         return None, e
 
 
@@ -531,7 +423,7 @@ class HTTPDownloader(threading.Thread):
 
     def __init__(self, i, request, start, timeout, opener=None,
                  shutdown_event=None):
-        threading.Thread.__init__(self)
+        super().__init__()
         self.request = request
         self.result = 0
         self.starttime = start
@@ -568,7 +460,7 @@ class HTTPDownloader(threading.Thread):
 class SocketTestBase(threading.Thread):
     def __init__(self, i, address, size, start, timeout, shutdown_event=None,
                  source_address=None):
-        threading.Thread.__init__(self)
+        super().__init__()
         self.result = 0
         self.starttime = start
         self.timeout = timeout
@@ -583,7 +475,7 @@ class SocketTestBase(threading.Thread):
         else:
             self._shutdown_event = FakeShutdownEvent()
 
-        self.sock = connection_factory(
+        self.sock = socket.create_connection(
             address,
             timeout=timeout,
             source_address=source_address
@@ -678,7 +570,7 @@ class HTTPUploader(threading.Thread):
 
     def __init__(self, i, request, start, size, timeout, opener=None,
                  shutdown_event=None):
-        threading.Thread.__init__(self)
+        super().__init__()
         self.request = request
         self.request.data.start = self.starttime = start
         self.size = size
@@ -963,8 +855,8 @@ class Speedtest(object):
         while 1:
             try:
                 configxml_list.append(stream.read(1024))
-            except (OSError, EOFError):
-                raise ConfigRetrievalError(get_exception())
+            except (OSError, EOFError) as e:
+                raise ConfigRetrievalError(e)
             if len(configxml_list[-1]) == 0:
                 break
         stream.close()
@@ -979,8 +871,7 @@ class Speedtest(object):
 
         try:
             root = ET.fromstring(configxml)
-        except ET.ParseError:
-            e = get_exception()
+        except ET.ParseError as e:
             raise SpeedtestConfigError(
                 'Malformed speedtest.net configuration: %s' % e
             )
@@ -1074,8 +965,8 @@ class Speedtest(object):
             while 1:
                 try:
                     serversxml_list.append(stream.read(1024))
-                except (OSError, EOFError):
-                    raise ServersRetrievalError(get_exception())
+                except (OSError, EOFError) as e:
+                    raise ServersRetrievalError(e)
                 if len(serversxml_list[-1]) == 0:
                     break
 
@@ -1197,13 +1088,13 @@ class Speedtest(object):
                 urlparts = urlparse(latency_url)
                 try:
                     if urlparts[0] == 'https':
-                        h = SpeedtestHTTPSConnection(
+                        h = HTTPSConnection(
                             urlparts[1],
                             source_address=source_address,
                             timeout=self._timeout,
                         )
                     else:
-                        h = SpeedtestHTTPConnection(
+                        h = HTTPConnection(
                             urlparts[1],
                             source_address=source_address,
                             timeout=self._timeout,
@@ -1214,8 +1105,7 @@ class Speedtest(object):
                     h.request("GET", path, headers=headers)
                     r = h.getresponse()
                     total = (timeit.default_timer() - start)
-                except HTTP_ERRORS:
-                    e = get_exception()
+                except HTTP_ERRORS as e:
                     printer('ERROR: %r' % e, debug=True)
                     cum.append(3600)
                     continue
@@ -1240,15 +1130,14 @@ class Speedtest(object):
             cum = []
             try:
                 printer('Server: %s' % (server['name'],), debug=False)
-                sock = connection_factory(
+                sock = socket.create_connection(
                     server['host'],
                     timeout=self._timeout,
                     source_address=source_address
                 )
                 sock.sendall('HI\n'.encode())
                 sock.recv(1024)
-            except socket.error:
-                e = get_exception()
+            except socket.error as e:
                 printer('ERROR: %r' % e, debug=True)
                 cum.append(3600 * 3)
                 continue
@@ -1263,8 +1152,7 @@ class Speedtest(object):
                          (int(timeit.time.time()) * 1000,)).encode()
                     )
                     resp = sock.recv(1024)
-                except socket.errror:
-                    e = get_exception()
+                except socket.error as e:
                     printer('ERROR: %r' % e, debug=True)
                     cum.append(3600)
                     continue
@@ -1739,9 +1627,9 @@ def shell():
             use_socket=args.socket,
             **kwargs
         )
-    except (ConfigRetrievalError,) + HTTP_ERRORS:
+    except (ConfigRetrievalError,) + HTTP_ERRORS as e:
         printer('Cannot retrieve speedtest configuration', error=True)
-        raise SpeedtestCLIError(get_exception())
+        raise SpeedtestCLIError(e)
 
     if args.search or args.list:
         try:
@@ -1749,9 +1637,9 @@ def shell():
                 speedtest.get_servers(search=args.search)
             else:
                 speedtest.get_servers()
-        except (ServersRetrievalError,) + HTTP_ERRORS:
+        except (ServersRetrievalError,) + HTTP_ERRORS as e:
             printer('Cannot retrieve speedtest server list', error=True)
-            raise SpeedtestCLIError(get_exception())
+            raise SpeedtestCLIError(e)
 
         for _, servers in sorted(speedtest.servers.items()):
             for server in servers:
@@ -1765,8 +1653,7 @@ def shell():
                 line += f' {host}'
                 try:
                     printer(line)
-                except IOError:
-                    e = get_exception()
+                except IOError as e:
                     if e.errno != errno.EPIPE:
                         raise
         sys.exit(0)
@@ -1786,9 +1673,9 @@ def shell():
                 'No matched servers: %s' %
                 ', '.join('%s' % s for s in args.server)
             )
-        except (ServersRetrievalError,) + HTTP_ERRORS:
+        except (ServersRetrievalError,) + HTTP_ERRORS as e:
             printer('Cannot retrieve speedtest server list', error=True)
-            raise SpeedtestCLIError(get_exception())
+            raise SpeedtestCLIError(e)
         except InvalidServerIDType:
             raise SpeedtestCLIError(
                 '%s is an invalid server type, must '
@@ -1863,8 +1750,7 @@ def main():
         shell()
     except KeyboardInterrupt:
         printer('\nCancelling...', error=True)
-    except (SpeedtestException, SystemExit):
-        e = get_exception()
+    except (SpeedtestException, SystemExit) as e:
         # Ignore a successful exit, or argparse exit
         if getattr(e, 'code', 1) not in (0, 2):
             msg = '%s' % e
