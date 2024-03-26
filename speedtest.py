@@ -908,6 +908,9 @@ class Speedtest(object):
     def set_mini_server(self, server):
         """Instead of querying for a list of servers, set a link to a speedtest mini server"""
 
+        if not server.startswith("http"):
+            server = "http://%s" % server
+
         urlparts = urlparse(server)
 
         name, ext = os.path.splitext(urlparts[2])
