@@ -47,7 +47,6 @@ from urllib.request import (
     ProxyHandler,
     Request,
     URLError,
-    urlopen,
 )
 
 HTTP_ERRORS = (HTTPError, URLError, socket.error, ssl.SSLError, BadStatusLine, ssl.CertificateError)
@@ -56,28 +55,22 @@ __version__ = "2.2.0a1"
 
 
 class FakeShutdownEvent(object):
-    """Class to fake a threading.Event.isSet so that users of this module
+    """Class to fake a threading.Event.is_set so that users of this module
     are not required to register their own threading.Event()
     """
 
     @staticmethod
-    def isSet():
+    def is_set():
         """Dummy method to always return false"""
         return False
-
-    is_set = isSet
 
 
 # Some global variables we use
 DEBUG = False
-_GLOBAL_DEFAULT_TIMEOUT = object()
 
 
 def event_is_set(event):
-    try:
-        return event.is_set()
-    except AttributeError:
-        return event.isSet()
+    return event.is_set()
 
 
 class SpeedtestException(Exception):
@@ -96,10 +89,6 @@ class SpeedtestConfigError(SpeedtestException):
     """Configuration XML is invalid"""
 
 
-class SpeedtestServersError(SpeedtestException):
-    """Servers XML is invalid"""
-
-
 class ConfigRetrievalError(SpeedtestHTTPError):
     """Could not retrieve config.php"""
 
@@ -114,22 +103,6 @@ class InvalidServerIDType(SpeedtestException):
 
 class NoMatchedServers(SpeedtestException):
     """No servers matched when filtering"""
-
-
-class SpeedtestMiniConnectFailure(SpeedtestException):
-    """Could not connect to the provided speedtest mini server"""
-
-
-class InvalidSpeedtestMiniServer(SpeedtestException):
-    """Server provided as a speedtest mini server does not actually appear to be a speedtest mini server"""
-
-
-class SpeedtestCustomConnectFailure(SpeedtestException):
-    """Could not connect to the provided speedtest custom server"""
-
-
-class InvalidSpeedtestCustomServer(SpeedtestException):
-    """Server provided as a speedtest custom server does not actually appear to be a speedtest custom server"""
 
 
 class ShareResultsConnectFailure(SpeedtestException):
@@ -148,10 +121,6 @@ class SpeedtestUploadTimeout(SpeedtestException):
 
 class SpeedtestBestServerFailure(SpeedtestException):
     """Unable to determine best server"""
-
-
-class SpeedtestMissingBestServer(SpeedtestException):
-    """get_best_server not called or not able to determine best server"""
 
 
 def make_source_address_tuple(source_address):
@@ -253,8 +222,6 @@ class GzipDecodedResponse(gzip.GzipFile):
 
     def __init__(self, response):
         # response doesn't support tell() and read(), required by GzipFile
-        if not gzip:
-            raise SpeedtestHTTPError("HTTP response body is gzip encoded, but gzip support is not available")
         IO = BytesIO or StringIO
         self.io = IO()
         while 1:
@@ -344,13 +311,8 @@ def catch_request(request, opener=None):
     connection with a HTTP/HTTPS request
     """
 
-    if opener:
-        _open = opener.open
-    else:
-        _open = urlopen
-
     try:
-        uh = _open(request)
+        uh = opener.open(request)
         if request.get_full_url() != uh.geturl():
             printer("Redirected to %s" % uh.geturl(), debug=True)
         return uh, False
@@ -405,22 +367,15 @@ def do_nothing(*args, **kwargs):
 class HTTPDownloader(threading.Thread):
     """Thread class for retrieving a URL"""
 
-    def __init__(self, i, request, start, timeout, opener=None, shutdown_event=None):
+    def __init__(self, i, request, start, timeout, opener, shutdown_event):
         super().__init__()
         self.request = request
         self.result = 0
         self.starttime = start
         self.timeout = timeout
         self.i = i
-        if opener:
-            self._opener = opener.open
-        else:
-            self._opener = urlopen
-
-        if shutdown_event:
-            self._shutdown_event = shutdown_event
-        else:
-            self._shutdown_event = FakeShutdownEvent()
+        self._opener = opener.open
+        self._shutdown_event = shutdown_event
 
     def run(self):
         try:
@@ -441,7 +396,7 @@ class HTTPDownloader(threading.Thread):
 
 
 class SocketTestBase(threading.Thread):
-    def __init__(self, i, address, size, start, timeout, shutdown_event=None, source_address=None):
+    def __init__(self, i, address, size, start, timeout, shutdown_event, source_address):
         super().__init__()
         self.result = 0
         self.starttime = start
@@ -451,11 +406,7 @@ class SocketTestBase(threading.Thread):
         self.remaining = self.size
 
         self._address = address
-
-        if shutdown_event:
-            self._shutdown_event = shutdown_event
-        else:
-            self._shutdown_event = FakeShutdownEvent()
+        self._shutdown_event = shutdown_event
 
         self.sock = socket.create_connection(address, timeout=timeout, source_address=source_address)
 
@@ -469,7 +420,7 @@ class SocketDownloader(SocketTestBase):
 
                 while (
                     self.remaining
-                    and not self._shutdown_event.isSet()
+                    and not self._shutdown_event.is_set()
                     and (timeit.default_timer() - self.starttime) <= self.timeout
                 ):
 
@@ -494,18 +445,12 @@ class SocketDownloader(SocketTestBase):
 class HTTPUploaderData(object):
     """File like object to improve cutting off the upload once the timeout has been reached"""
 
-    def __init__(self, length, start, timeout, shutdown_event=None):
+    def __init__(self, length, start, timeout, shutdown_event):
         self.length = length
         self.start = start
         self.timeout = timeout
-
-        if shutdown_event:
-            self._shutdown_event = shutdown_event
-        else:
-            self._shutdown_event = FakeShutdownEvent()
-
+        self._shutdown_event = shutdown_event
         self._data = None
-
         self.total = 0
 
     def pre_allocate(self):
@@ -538,7 +483,7 @@ class HTTPUploaderData(object):
 class HTTPUploader(threading.Thread):
     """Thread class for putting a URL"""
 
-    def __init__(self, i, request, start, size, timeout, opener=None, shutdown_event=None):
+    def __init__(self, i, request, start, size, timeout, opener, shutdown_event):
         super().__init__()
         self.request = request
         self.request.data.start = self.starttime = start
@@ -546,29 +491,14 @@ class HTTPUploader(threading.Thread):
         self.result = 0
         self.timeout = timeout
         self.i = i
-
-        if opener:
-            self._opener = opener.open
-        else:
-            self._opener = urlopen
-
-        if shutdown_event:
-            self._shutdown_event = shutdown_event
-        else:
-            self._shutdown_event = FakeShutdownEvent()
+        self._opener = opener.open
+        self._shutdown_event = shutdown_event
 
     def run(self):
         request = self.request
         try:
             if (timeit.default_timer() - self.starttime) <= self.timeout and not event_is_set(self._shutdown_event):
-                try:
-                    f = self._opener(request)
-                except TypeError:
-                    # PY24 expects a string or buffer
-                    # This also causes issues with Ctrl-C, but we will concede
-                    # for the moment that Ctrl-C on PY24 isn't immediate
-                    request = build_request(self.request.get_full_url(), data=request.data.read(self.size))
-                    f = self._opener(request)
+                f = self._opener(request)
                 f.read(11)
                 f.close()
                 self.result = self.request.data.total
@@ -589,7 +519,7 @@ class SocketUploader(SocketTestBase):
 
                 while (
                     self.remaining
-                    and not self._shutdown_event.isSet()
+                    and not self._shutdown_event.is_set()
                     and (timeit.default_timer() - self.starttime) <= self.timeout
                 ):
 
@@ -1077,7 +1007,6 @@ class Speedtest(object):
         for server in servers:
             cum = []
             try:
-                printer("Server: %s" % (server["name"],), debug=False)
                 sock = socket.create_connection(server["host"], timeout=self._timeout, source_address=source_address)
                 sock.sendall("HI\n".encode())
                 sock.recv(1024)
@@ -1351,12 +1280,6 @@ def parse_args():
     )
 
     parser = ArgParser(description=description)
-    # Give optparse.OptionParser an `add_argument` method for
-    # compatibility with argparse.ArgumentParser
-    try:
-        parser.add_argument = parser.add_option
-    except AttributeError:
-        pass
     parser.add_argument(
         "--no-download",
         dest="download",
