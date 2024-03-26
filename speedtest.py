@@ -26,8 +26,6 @@ import socket
 import sys
 import threading
 import timeit
-import xml.parsers.expat
-
 import json
 
 import xml.etree.ElementTree as ET
@@ -1046,119 +1044,89 @@ class Speedtest(object):
 
         return self.config
 
-    def get_servers(self, servers=None, exclude=None):
-        """Retrieve a the list of speedtest.net servers, optionally filtered
-        to servers matching those specified in the ``servers`` argument
-        """
+    def get_servers(self, servers=None, exclude=None, search=None):
         if servers is None:
             servers = []
-
         if exclude is None:
             exclude = []
-
         self.servers.clear()
 
-        for server_list in (servers, exclude):
-            for i, s in enumerate(server_list):
-                try:
-                    server_list[i] = int(s)
-                except ValueError:
-                    raise InvalidServerIDType(
-                        '%s is an invalid server type, must be int' % s
-                    )
-
-        urls = [
-            '://www.speedtest.net/speedtest-servers-static.php',
-            'http://c.speedtest.net/speedtest-servers-static.php',
-            '://www.speedtest.net/speedtest-servers.php',
-            'http://c.speedtest.net/speedtest-servers.php',
-        ]
-
+        url = 'https://www.speedtest.net/api/js/servers'
+        if search:
+            url += f'?engine=js&search={search}&limit=100'
         headers = {}
         if gzip:
             headers['Accept-Encoding'] = 'gzip'
 
-        errors = []
-        for url in urls:
-            try:
-                request = build_request(
-                    '%s?threads=%s' % (url,
-                                       self.config['threads']['download']),
-                    headers=headers,
-                    secure=self._secure
-                )
-                uh, e = catch_request(request, opener=self._opener)
-                if e:
-                    errors.append('%s' % e)
-                    raise ServersRetrievalError()
+        try:
+            request = build_request(
+                '%s?threads=%s' % (url, self.config['threads']['download']),
+                headers=headers,
+                secure=self._secure
+            )
+            uh, e = catch_request(request, opener=self._opener)
+            if e:
+                raise ServersRetrievalError()
 
-                stream = get_response_stream(uh)
+            stream = get_response_stream(uh)
 
-                serversxml_list = []
-                while 1:
-                    try:
-                        serversxml_list.append(stream.read(1024))
-                    except (OSError, EOFError):
-                        raise ServersRetrievalError(get_exception())
-                    if len(serversxml_list[-1]) == 0:
-                        break
-
-                stream.close()
-                uh.close()
-
-                if int(uh.code) != 200:
-                    raise ServersRetrievalError()
-
-                serversxml = ''.encode().join(serversxml_list)
-
-                printer('Servers XML:\n%s' % serversxml, debug=True)
-
+            serversxml_list = []
+            while 1:
                 try:
+                    serversxml_list.append(stream.read(1024))
+                except (OSError, EOFError):
+                    raise ServersRetrievalError(get_exception())
+                if len(serversxml_list[-1]) == 0:
+                    break
+
+            stream.close()
+            uh.close()
+
+            if int(uh.code) != 200:
+                raise ServersRetrievalError()
+
+            serversxml = ''.encode().join(serversxml_list)
+            printer('Servers JSON:\n%s' % serversxml, debug=True)
+            try:
+                elements = json.loads(serversxml)
+            except (ValueError, json.JSONDecodeError):
+                raise ServersRetrievalError()
+
+            for server in elements:
+                try:
+                    server_id = int(server['id'])
+                    if servers and server_id not in servers:
+                        continue
+                    if (
+                        server_id in self.config['ignore_servers']
+                        or server_id in exclude
+                    ):
+                        continue
                     try:
-                        root = ET.fromstring(serversxml)
-                    except ET.ParseError:
-                        e = get_exception()
-                        raise SpeedtestServersError(
-                            'Malformed speedtest.net server list: %s' % e
+                        d = distance(
+                            self.lat_lon,
+                            (float(server['lat']), float(server['lon']))
                         )
-                    elements = ET.Element.iter(root, 'server')
-                except (SyntaxError, xml.parsers.expat.ExpatError):
-                    raise ServersRetrievalError()
-
-                for server in elements:
-                    try:
-                        attrib = server.attrib
-                    except AttributeError:
-                        attrib = dict(list(server.attributes.items()))
-
-                    if servers and int(attrib.get('id')) not in servers:
-                        continue
-
-                    if (int(attrib.get('id')) in self.config['ignore_servers']
-                            or int(attrib.get('id')) in exclude):
-                        continue
-
-                    host, port = attrib['host'].split(':')
-                    attrib['host'] = (host, int(port))
-
-                    try:
-                        d = distance(self.lat_lon,
-                                     (float(attrib.get('lat')),
-                                      float(attrib.get('lon'))))
                     except Exception:
                         continue
-
-                    attrib['d'] = d
-
+                    host, port = server['host'].split(':')
+                    server = {
+                        'id': server_id,
+                        'host': (host, int(port)),
+                        'url': server['url'],
+                        'sponsor': server['sponsor'],
+                        'name': server['name'],
+                        'country': server['country'],
+                        'd': d,
+                    }
                     try:
-                        self.servers[d].append(attrib)
+                        self.servers[d].append(server)
                     except KeyError:
-                        self.servers[d] = [attrib]
-
-                break
-
-            except ServersRetrievalError:
-                continue
+                        self.servers[d] = [server]
+                except Exception:
+                    continue
+        except ServersRetrievalError:
+            pass
 
         if (servers or exclude) and not self.servers:
             raise NoMatchedServers()
@@ -1634,6 +1602,8 @@ def parse_args():
     parser.add_argument('--list', action='store_true',
                         help='Display a list of speedtest.net servers '
                              'sorted by distance')
+    parser.add_argument('--search', type=str,
+                        help='Find servers by name / location')
     parser.add_argument('--server', type=int, action='append',
                         help='Specify a server ID to test against. Can be '
                              'supplied multiple times')
@@ -1773,17 +1743,26 @@ def shell():
         printer('Cannot retrieve speedtest configuration', error=True)
         raise SpeedtestCLIError(get_exception())
 
-    if args.list:
+    if args.search or args.list:
         try:
-            speedtest.get_servers()
+            if args.search:
+                speedtest.get_servers(search=args.search)
+            else:
+                speedtest.get_servers()
         except (ServersRetrievalError,) + HTTP_ERRORS:
             printer('Cannot retrieve speedtest server list', error=True)
             raise SpeedtestCLIError(get_exception())
 
         for _, servers in sorted(speedtest.servers.items()):
             for server in servers:
-                line = ('%(id)5s) %(sponsor)s (%(name)s, %(country)s) '
-                        '[%(d)0.2f km]' % server)
+                id = server['id']
+                sponsor = server['sponsor']
+                name = server['name']
+                country = server['country']
+                d = server['d']
+                host = f'{server["host"][0]}:{server["host"][1]}'
+                line = f'{id:5d} {sponsor} ({name}, {country}) [{d:0.2f} km]'
+                line += f' {host}'
                 try:
                     printer(line)
                 except IOError:
