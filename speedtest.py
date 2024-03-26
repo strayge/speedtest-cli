@@ -920,17 +920,19 @@ class Speedtest(object):
             url = server
 
         host, port = urlparts[1].split(":")
-        self.servers = [
-            {
-                "sponsor": "Speedtest Mini",
-                "name": urlparts[1],
-                "host": (host, int(port)),
-                "d": 0,
-                "url": "%s/speedtest/upload.php" % (url.rstrip("/"),),
-                "latency": 0,
-                "id": 0,
-            }
-        ]
+        self.servers = {
+            0: [
+                {
+                    "sponsor": "Speedtest Mini",
+                    "name": urlparts[1],
+                    "host": (host, int(port)),
+                    "d": 0,
+                    "url": "%s/speedtest/upload.php" % (url.rstrip("/"),),
+                    "latency": 0,
+                    "id": 0,
+                }
+            ]
+        }
 
         return self.servers
 
